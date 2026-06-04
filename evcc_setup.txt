@@ -1,0 +1,58 @@
+title: Q4 - App
+icon: car
+capacity: 77 # kWh
+
+## required attributes
+
+soc: # state of charge
+  source: http
+  uri: http://ev_car_connector_carConnector_1:9920/charge
+  method: GET
+  jq: .soc
+  cache: 600s
+  timeout: 20s
+status: # status [A..F]
+  source: http
+  uri: http://ev_car_connector_carConnector_1:9920/charge
+  method: GET
+  jq: .status
+  cache: 600s
+  timeout: 20s
+range: # range
+  source: http
+  uri: http://ev_car_connector_carConnector_1:9920/charge
+  method: GET
+  jq: .range
+  cache: 600s
+  timeout: 20s
+climater: # climate active
+  source: http
+  uri: http://ev_car_connector_carConnector_1:9920/charge
+  method: GET
+  jq: .climater
+  cache: 600s
+  timeout: 20s
+
+
+## optional attributes (read-only)
+
+#limitsoc: # in-vehicle charge limit
+#  source: const
+#  value: 80 # %
+#finishtime: # finish time (RFC3339)
+#  source: const
+#  value: "2030-01-01T00:00:00Z"
+#getmaxcurrent: # max charge current
+#  source: const
+#  value: 16.0 # A
+## optional attributes (writeable)
+
+#wakeup: # wake up vehicle
+#    source: js
+#    script: console.log(wakeup);
+#chargeenable: # start/stop charging
+#    source: js
+#    script: console.log(chargeenable);
+#maxcurrent: # set max charge current
+#    source: js
+#    script: console.log(maxcurrent);
