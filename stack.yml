@@ -4,11 +4,13 @@ services:
   carConnector:
     image: car_connector:latest
     restart: always
+    privileged: true
     networks:
        - networking
     environment:
        - "TZ=Europe/Berlin"
        - "API_PORT=:80"
+       - "REG_RECENT=gerade eben"
        - "REG_SOC=Aktueller Ladestand: ([0-9]+).?%"
        - "REG_RANGE=Aktuelle Reichweite: ([0-9]+).?km"
        - "REG_CLIMATE=Klimatisierung – Die Funktion ist aktiv."
@@ -17,6 +19,8 @@ services:
        - "REG_CONNECTED=Ladestation"
        - "CMD_REFRESH=input swipe 400 630 400 1200"
        - "CMD_CLIMATE=input tap 351 971"
+    volumes:
+       - /dev/bus/usb:/dev/bus/usb
     ports:
       - target: 80
         published: 9920

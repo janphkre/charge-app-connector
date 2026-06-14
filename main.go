@@ -21,6 +21,7 @@ const (
 
 type Configuration struct {
 
+	regRecent *regexp.Regexp
 	regSoc *regexp.Regexp
 	regRange *regexp.Regexp
 	regClimate *regexp.Regexp
@@ -35,6 +36,7 @@ type Configuration struct {
 }
 
 type AppData struct {
+	IsRecent bool
 	Status string
 	Climater bool
 	Range int
@@ -81,8 +83,11 @@ func getConfig() (error, *Configuration) {
 	if err != nil {
 		return err, nil
 	}
-	
-	
+
+	err, regRecentString := getEnv("REG_RECENT")
+	if err != nil {
+		return err, nil
+	}
 	err, regSocString := getEnv("REG_SOC")
 	if err != nil {
 		return err, nil
@@ -108,6 +113,7 @@ func getConfig() (error, *Configuration) {
 		return err, nil
 	}
 
+	configuration.regRecent = regexp.MustCompile(regRecentString)
 	configuration.regSoc = regexp.MustCompile(regSocString)
 	configuration.regRange = regexp.MustCompile(regRangeString)
 	configuration.regClimate = regexp.MustCompile(regClimateString)
@@ -132,7 +138,7 @@ func writeBadRequest(w http.ResponseWriter, errorMsg string) {
 
 func writeAppDataResponse(w http.ResponseWriter, value *AppData) {
 	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, fmt.Sprintf("{\"status\":\"%s\",\"climater\":%t,\"range\":%d,\"soc\":%d}", value.Status, value.Climater, value.Range, value.Soc))
+	io.WriteString(w, fmt.Sprintf("{\"recent\":%t,\"status\":\"%s\",\"climater\":%t,\"range\":%d,\"soc\":%d}", value.IsRecent, value.Status, value.Climater, value.Range, value.Soc))
 }
 
 func (config *Configuration) handleHttpCharge(w http.ResponseWriter, r *http.Request) {
@@ -201,11 +207,11 @@ func (config *Configuration) readAppData() (*AppData, error) {
 	}
 	climateActive := config.regClimate.MatchString(shellOutput)
 	appData.Climater = climateActive
-	hasError := config.regError.MatchString(shellOutput)
-	if hasError {
-		appData.Status = "E"
-		return &appData, nil
-	}
+//	hasError := config.regError.MatchString(shellOutput)
+//	if hasError {
+//		appData.Status = "E"
+//		return &appData, nil
+//	}
 	isCharging := config.regCharge.MatchString(shellOutput)
 	if isCharging {
 		appData.Status = "C"
@@ -236,6 +242,8 @@ func (config *Configuration) toggleClimate() (*AppData, error) {
 		return nil, err
 	}
 	appData := AppData {}
+	IsRecent := config.regRecent.MatchString(shellOutput)
+	appData.IsRecent = IsRecent
 	socMatches := config.regSoc.FindStringSubmatch(shellOutput)
 	if len(socMatches) > 0 {
 		appData.Soc, err = strconv.Atoi(socMatches[1])
@@ -246,7 +254,6 @@ func (config *Configuration) toggleClimate() (*AppData, error) {
 	}
 	climateActive := config.regClimate.MatchString(shellOutput)
 	appData.Climater = climateActive
-// evcc does not support error status E?
 //	hasError := config.regError.MatchString(shellOutput)
 //	if hasError {
 //		appData.Status = "E"
