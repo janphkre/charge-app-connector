@@ -12,11 +12,17 @@ import (
 	"os/exec"
 	"io"
 	"regexp"
+	"sync"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const (
 	HTTP_CHARGE_PATH = "/charge"
 	HTTP_CLIMATE_PATH = "/climate"
+	HTTP_PROBE_PATH = "/probe"
+	CACHE_TTL = 14 * time.Minute
 )
 
 type Configuration struct {
@@ -33,9 +39,33 @@ type Configuration struct {
         API_PORT string
         CMD_REFRESH string
         CMD_CLIMATE string
+	ADB_URL string
+
+	// cacheMu also serializes adb access, so concurrent requests don't interfere on the device.
+	cacheMu sync.Mutex
+	cached *AppData
+
+	// latestMu guards latest, a copy of cached that can be read without waiting for adb.
+	latestMu sync.RWMutex
+	latest *AppData
+}
+
+func (config *Configuration) setCached(value *AppData) {
+	config.cached = value
+	config.latestMu.Lock()
+	config.latest = value
+	config.latestMu.Unlock()
+}
+
+// Latest returns the most recent app data without any adb traffic, or nil if none was read yet.
+func (config *Configuration) Latest() *AppData {
+	config.latestMu.RLock()
+	defer config.latestMu.RUnlock()
+	return config.latest
 }
 
 type AppData struct {
+	CapturedAt time.Time
 	IsRecent bool
 	Status string
 	Climater bool
@@ -54,16 +84,27 @@ func main() {
 	cmd := exec.Command("adb", "start-server")
 	adbErr := cmd.Run()
 	if adbErr != nil {
-		log.Fatal("Failed to start adb", adbErr)
+		log.Println("Failed to start adb", adbErr)
 		os.Exit(5)
+	}
+
+	cmd = exec.Command("adb", "connect", configuration.ADB_URL)
+	adbErr = cmd.Run()
+	if adbErr != nil {
+		log.Println("Failed to connect to emulator", adbErr)
+		os.Exit(6)
 	}
 
 	http.HandleFunc(HTTP_CHARGE_PATH, configuration.handleHttpCharge)
 	http.HandleFunc(HTTP_CLIMATE_PATH, configuration.handleHttpClimate)
 
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(newAppCollector(configuration))
+	http.Handle(HTTP_PROBE_PATH, promhttp.HandlerFor(registry, promhttp.HandlerOpts{}))
+
         err := http.ListenAndServe(configuration.API_PORT, nil)
 	if err != nil {
-                log.Fatal(err)
+                log.Println(err)
 		os.Exit(4)
         }
 }
@@ -138,28 +179,39 @@ func writeBadRequest(w http.ResponseWriter, errorMsg string) {
 
 func writeAppDataResponse(w http.ResponseWriter, value *AppData) {
 	w.WriteHeader(http.StatusOK)
-	io.WriteString(w, fmt.Sprintf("{\"recent\":%t,\"status\":\"%s\",\"climater\":%t,\"range\":%d,\"soc\":%d}", value.IsRecent, value.Status, value.Climater, value.Range, value.Soc))
+	io.WriteString(w, fmt.Sprintf("{\"recent\":%t,\"status\":\"%s\",\"climater\":%t,\"range\":%d,\"soc\":%d,\"timestamp\":\"%s\"}", value.IsRecent, value.Status, value.Climater, value.Range, value.Soc, value.CapturedAt.UTC().Format(time.RFC3339)))
 }
 
 func (config *Configuration) handleHttpCharge(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type","application/json; charset=utf-8")
+	config.cacheMu.Lock()
+	defer config.cacheMu.Unlock()
+	if config.cached != nil && time.Since(config.cached.CapturedAt) < CACHE_TTL {
+		writeAppDataResponse(w, config.cached)
+		return
+	}
 	value, err := config.readAppData()
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 		writeBadRequest(w, "Could not read charge value from adb.")
 		return
 	}
+	config.setCached(value)
 	writeAppDataResponse(w, value)
 }
 
+// handleHttpClimate always toggles the climate, but refreshes the cache with the result.
 func (config *Configuration) handleHttpClimate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type","application/json; charset=utf-8")
+	config.cacheMu.Lock()
+	defer config.cacheMu.Unlock()
 	value, err := config.toggleClimate()
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 		writeBadRequest(w, "Could not write climate value to adb.")
 		return
 	}
+	config.setCached(value)
 	writeAppDataResponse(w, value)
 }
 
@@ -187,16 +239,22 @@ func (config *Configuration) readAppData() (*AppData, error) {
 		return nil, err
 	}
 
-	shellOutput, err := dev.RunShellCommand(config.CMD_REFRESH)
+	_, err = dev.RunShellCommand(config.CMD_REFRESH)
 	if err != nil {
 		return nil, err
 	}
 	time.Sleep(10 * time.Second)
-	shellOutput, err = dev.RunShellCommand("uiautomator dump /dev/tty")
+	return config.dumpAppData(dev)
+}
+
+func (config *Configuration) dumpAppData(dev *gadb.Device) (*AppData, error) {
+	shellOutput, err := dev.RunShellCommand("uiautomator dump /dev/tty")
 	if err != nil {
 		return nil, err
 	}
-	appData := AppData {}
+	appData := AppData { CapturedAt: time.Now() }
+	IsRecent := config.regRecent.MatchString(shellOutput)
+	appData.IsRecent = IsRecent
 	socMatches := config.regSoc.FindStringSubmatch(shellOutput)
 	if len(socMatches) > 0 {
 		appData.Soc, err = strconv.Atoi(socMatches[1])
@@ -232,43 +290,10 @@ func (config *Configuration) toggleClimate() (*AppData, error) {
 	if err != nil {
 		return nil, err
 	}
-	shellOutput, err := dev.RunShellCommand(config.CMD_CLIMATE)
+	_, err = dev.RunShellCommand(config.CMD_CLIMATE)
 	if err != nil {
 		return nil, err
 	}
 	time.Sleep(1 * time.Second)
-	shellOutput, err = dev.RunShellCommand("uiautomator dump /dev/tty")
-	if err != nil {
-		return nil, err
-	}
-	appData := AppData {}
-	IsRecent := config.regRecent.MatchString(shellOutput)
-	appData.IsRecent = IsRecent
-	socMatches := config.regSoc.FindStringSubmatch(shellOutput)
-	if len(socMatches) > 0 {
-		appData.Soc, err = strconv.Atoi(socMatches[1])
-	}
-	rangeMatches := config.regRange.FindStringSubmatch(shellOutput)
-	if len(rangeMatches) > 0 {
-		appData.Range, err = strconv.Atoi(rangeMatches[1])
-	}
-	climateActive := config.regClimate.MatchString(shellOutput)
-	appData.Climater = climateActive
-//	hasError := config.regError.MatchString(shellOutput)
-//	if hasError {
-//		appData.Status = "E"
-//		return &appData, nil
-//	}
-	isCharging := config.regCharge.MatchString(shellOutput)
-	if isCharging {
-		appData.Status = "C"
-		return &appData, nil
-	}
-	isConnected := config.regConnected.MatchString(shellOutput)
-	if isConnected {
-		appData.Status = "B"
-		return &appData, nil
-	}
-	appData.Status = "A"
-	return &appData, nil
+	return config.dumpAppData(dev)
 }

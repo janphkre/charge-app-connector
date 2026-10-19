@@ -10,6 +10,7 @@ WORKDIR /app
 
 COPY go.mod ./
 COPY main.go ./
+COPY metrics.go ./
 
 RUN go mod tidy
 RUN go build -o /car_connector
