@@ -3,6 +3,10 @@ version: '3.2'
 services:
   carConnector:
     image: car_connector:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
     restart: always
     privileged: true
     networks:
